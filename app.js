@@ -60,14 +60,30 @@ class SelfDisciplineApp {
     }
 
     init() {
-        this.updateTheme();
-        this.updateQuote();
-        this.renderCalendar();
-        this.updateStats();
-        this.bindEvents();
-        this.checkYesterdayReminder();
-        
-        setInterval(() => this.updateTheme(), 60000);
+        try {
+            this.cleanupOrphanedOverlays();
+            this.updateTheme();
+            this.updateQuote();
+            this.renderCalendar();
+            this.updateStats();
+            this.bindEvents();
+            this.renderPlansForDate(this.formatDate(new Date()));
+            this.checkYesterdayReminder();
+            
+            setInterval(() => this.updateTheme(), 60000);
+            console.log('✅ 自律打卡系统初始化成功');
+        } catch (error) {
+            console.error('❌ 初始化错误:', error);
+        }
+    }
+
+    cleanupOrphanedOverlays() {
+        document.querySelectorAll('.modal-overlay:not(#globalModalOverlay)').forEach(overlay => {
+            const modals = overlay.querySelectorAll('.modal');
+            modals.forEach(modal => document.body.appendChild(modal));
+            overlay.remove();
+        });
+        console.log('✅ 已清理残留遮罩层');
     }
 
     updateTheme() {
@@ -185,7 +201,7 @@ class SelfDisciplineApp {
         dayElement.className = 'calendar-day';
         
         if (isOtherMonth) {
-            dayElement.classList.add('other-month');
+            dayElement.classList.add('empty');
         }
         
         if (isToday) {
@@ -197,32 +213,76 @@ class SelfDisciplineApp {
         const completedPlans = this.getCompletedPlansForDate(dateStr);
         
         if (dayPlans.length > 0) {
-            dayElement.classList.add('has-plans');
-            if (dayPlans.length === completedPlans.length) {
+            if (dayPlans.length === completedPlans.length && dayPlans.length > 0) {
                 dayElement.classList.add('completed');
             }
         }
         
         const dayNumber = document.createElement('div');
-        dayNumber.className = 'day-number';
+        dayNumber.className = 'calendar-day-number';
         dayNumber.textContent = day;
         dayElement.appendChild(dayNumber);
         
+        const dayInfo = document.createElement('div');
+        dayInfo.className = 'calendar-day-info';
+        
         if (dayPlans.length > 0) {
-            const plansCount = document.createElement('div');
-            plansCount.className = 'day-plans-count';
-            plansCount.textContent = `${completedPlans.length}/${dayPlans.length} 完成`;
-            dayElement.appendChild(plansCount);
+            const completionRate = dayPlans.length > 0 
+                ? Math.round((completedPlans.length / dayPlans.length) * 100) 
+                : 0;
+            
+            const completion = document.createElement('div');
+            completion.className = 'calendar-day-completion';
+            completion.textContent = `${completedPlans.length}/${dayPlans.length} · ${completionRate}%`;
+            dayInfo.appendChild(completion);
+            
+            const plansDots = document.createElement('div');
+            plansDots.className = 'calendar-day-plans';
+            
+            const displayDots = dayPlans.slice(0, 5);
+            displayDots.forEach((plan, index) => {
+                const dot = document.createElement('span');
+                dot.className = 'calendar-day-plan-dot';
+                const completionKey = `${dateStr}-${plan.id}`;
+                if (this.completions[completionKey]) {
+                    dot.classList.add('completed');
+                }
+                plansDots.appendChild(dot);
+            });
+            
+            dayInfo.appendChild(plansDots);
         }
         
+        dayElement.appendChild(dayInfo);
+        
         if (!isOtherMonth) {
-            dayElement.addEventListener('click', () => this.showDayDetail(date));
+            dayElement.addEventListener('click', () => {
+                this.selectedDate = date;
+                const dateStr = this.formatDate(date);
+                
+                document.querySelectorAll('.calendar-day').forEach(d => d.classList.remove('selected'));
+                dayElement.classList.add('selected');
+                
+                this.showDayDetail(date);
+            });
         }
         
         return dayElement;
     }
 
     formatDate(date) {
+        if (!(date instanceof Date)) {
+            if (typeof date === 'string') {
+                date = new Date(date);
+            } else {
+                date = new Date();
+            }
+        }
+        
+        if (isNaN(date.getTime())) {
+            date = new Date();
+        }
+        
         const year = date.getFullYear();
         const month = String(date.getMonth() + 1).padStart(2, '0');
         const day = String(date.getDate()).padStart(2, '0');
@@ -246,6 +306,13 @@ class SelfDisciplineApp {
                 return diffDays % plan.periodDays === 0;
             }
             return plan.date === dateStr;
+        }).sort((a, b) => {
+            if (a.order && b.order) {
+                return a.order - b.order;
+            }
+            const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+            const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+            return bTime - aTime;
         });
     }
 
@@ -257,36 +324,246 @@ class SelfDisciplineApp {
         });
     }
 
-    showDayDetail(date) {
-        this.selectedDate = date;
-        const dateStr = this.formatDate(date);
+    renderPlansForDate(dateStr) {
+        const plansList = document.getElementById('plansList');
+        const plansDate = document.getElementById('plansDate');
+        const batchActionsBar = document.getElementById('batchActionsBar');
+        const isBatchMode = document.getElementById('batchSelectAllPlans')?.checked || false;
+        
+        const date = new Date(dateStr);
+        const dateDisplay = `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
+        plansDate.textContent = dateDisplay;
+        
         const dayPlans = this.getPlansForDate(dateStr);
+        
+        if (dayPlans.length === 0) {
+            plansList.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-icon"></div>
+                    <p>暂无计划，点击右上角添加</p>
+                </div>
+            `;
+            batchActionsBar.style.display = 'none';
+            return;
+        }
+        
+        batchActionsBar.style.display = this.selectedPlans.size > 0 ? 'flex' : 'none';
+        
+        plansList.innerHTML = dayPlans.map(plan => {
+            const completionKey = `${dateStr}-${plan.id}`;
+            const isCompleted = this.completions[completionKey];
+            const isSelected = this.selectedPlans.has(plan.id);
+            const canComplete = this.canCompletePlan(new Date(dateStr));
+            
+            return `
+                <div class="plan-item ${isCompleted ? 'completed' : ''} ${isSelected ? 'plan-item-checkbox selected' : ''}" 
+                     data-plan-id="${plan.id}">
+                    <input type="checkbox" class="plan-checkbox" 
+                           data-plan-id="${plan.id}" 
+                           ${isSelected ? 'checked' : ''}
+                           style="display: ${isBatchMode ? 'block' : 'none'}">
+                    <div class="plan-body">
+                        <div class="plan-item-header">
+                            <span class="plan-item-title">${plan.title}</span>
+                            <span class="plan-item-status priority-${plan.priority || 'medium'}">
+                                ${isCompleted ? '已完成' : plan.priority === 'high' ? '高优先级' : plan.priority === 'low' ? '低优先' : '进行中'}
+                            </span>
+                        </div>
+                        ${plan.content ? `<div class="plan-item-content">${plan.content}</div>` : ''}
+                        ${plan.isPeriodic ? `<div class="plan-periodic">每${plan.periodDays}天重复${plan.endDate ? ` 至 ${plan.endDate}` : ''}</div>` : ''}
+                        <div class="plan-item-actions">
+                            ${!isCompleted ? `
+                                <button class="btn-complete small" 
+                                    data-plan-id="${plan.id}" 
+                                    data-date="${dateStr}"
+                                    ${!canComplete ? 'disabled' : ''}>
+                                    ${canComplete ? '完成' : '未到日期'}
+                                </button>
+                            ` : ''}
+                            <button class="btn-delete small" 
+                                data-plan-id="${plan.id}">
+                                删除
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+        
+        plansList.querySelectorAll('.plan-checkbox').forEach(checkbox => {
+            checkbox.addEventListener('change', (e) => {
+                const planId = e.target.dataset.planId;
+                const item = checkbox.closest('.plan-item');
+                if (e.target.checked) {
+                    this.selectedPlans.add(planId);
+                    item.classList.add('selected');
+                } else {
+                    this.selectedPlans.delete(planId);
+                    item.classList.remove('selected');
+                }
+                this.updateSelectedCount();
+            });
+        });
+        
+        plansList.querySelectorAll('.btn-complete').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const planId = e.target.dataset.planId;
+                const date = e.target.dataset.date;
+                this.confirmCompletePlan(planId, date);
+            });
+        });
+        
+        plansList.querySelectorAll('.btn-delete').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const planId = e.target.dataset.planId;
+                this.deletePlan(planId);
+            });
+        });
+    }
+
+    deletePlan(planId) {
+        this.plans = this.plans.filter(p => p.id !== planId);
+        this.savePlans();
+        this.renderCalendar();
+        this.updateStats();
+        const dateForRender = this.selectedDate ? this.formatDate(this.selectedDate) : this.formatDate(new Date());
+        this.renderPlansForDate(dateForRender);
+        this.showToast('计划已删除');
+    }
+
+    confirmCompletePlan(planId, date) {
+        const globalState = { planId, date };
+        this.pendingCompletePlan = globalState;
+        window.app = this;
+        window.__PENDING_PLAN = globalState;
+        window.pendingCompletePlan = globalState;
+        
+        const modal = document.getElementById('confirmModal');
+        this.activateModal(modal);
+        
+        const cancelBtn = document.getElementById('cancelComplete');
+        const confirmBtn = document.getElementById('confirmComplete');
+        
+        cancelBtn.disabled = true;
+        confirmBtn.disabled = true;
+        cancelBtn.setAttribute('disabled', 'disabled');
+        confirmBtn.setAttribute('disabled', 'disabled');
+        cancelBtn.classList.add('btn-disabled');
+        confirmBtn.classList.add('btn-disabled');
+        
+        setTimeout(() => {
+            cancelBtn.disabled = false;
+            confirmBtn.disabled = false;
+            cancelBtn.removeAttribute('disabled');
+            confirmBtn.removeAttribute('disabled');
+            cancelBtn.classList.remove('btn-disabled');
+            confirmBtn.classList.remove('btn-disabled');
+            
+            cancelBtn.style.cssText = `
+                pointer-events: auto !important;
+                cursor: pointer !important;
+                opacity: 1 !important;
+            `;
+            confirmBtn.style.cssText = `
+                pointer-events: auto !important;
+                cursor: pointer !important;
+                opacity: 1 !important;
+            `;
+            
+            cancelBtn.style.animation = 'none';
+            confirmBtn.style.animation = 'none';
+            cancelBtn.offsetHeight;
+            confirmBtn.offsetHeight;
+            cancelBtn.classList.add('btn-unlocked');
+            confirmBtn.classList.add('btn-unlocked');
+            
+            console.log('✨ 按钮解禁完成，现在可以点击！');
+            console.log('🔍 最终状态确认 - __PENDING_PLAN:', window.__PENDING_PLAN);
+            
+            setTimeout(() => {
+                cancelBtn.classList.remove('btn-unlocked');
+                confirmBtn.classList.remove('btn-unlocked');
+            }, 600);
+        }, 1500);
+    }
+
+    completePlan(planId, date) {
+        console.log('📝 执行完成计划:', planId, date);
+        const completionKey = `${date}-${planId}`;
+        this.completions[completionKey] = true;
+        this.saveCompletions();
+        this.renderCalendar();
+        this.updateStats();
+        const renderDate = this.selectedDate ? this.formatDate(this.selectedDate) : this.formatDate(new Date());
+        this.renderPlansForDate(renderDate);
+        
+        if (this.selectedDate) {
+            this.showDayDetail(this.selectedDate);
+        }
+        
+        const modal = document.getElementById('confirmModal');
+        this.deactivateModal(modal);
+        this.closeAllModals();
+        
+        this.showToast('太棒了！计划已完成 🎉');
+        console.log('✅ 计划完成，弹窗关闭');
+    }
+
+    showDayDetail(date) {
+        if (date instanceof Date) {
+            this.selectedDate = date;
+        } else if (typeof date === 'string') {
+            this.selectedDate = new Date(date);
+            if (isNaN(this.selectedDate.getTime())) {
+                this.selectedDate = new Date();
+            }
+        } else {
+            this.selectedDate = new Date();
+        }
+        
+        const dateStr = this.formatDate(this.selectedDate);
+        const dayPlans = this.getPlansForDate(dateStr);
+        
+        this.renderPlansForDate(dateStr);
         
         const modal = document.getElementById('dayDetailModal');
         const title = document.getElementById('dayDetailTitle');
         const plansContainer = document.getElementById('dayPlans');
         
-        const dateDisplay = `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
+        const completedCount = dayPlans.filter(p => this.completions[`${dateStr}-${p.id}`]).length;
+        const pendingCount = dayPlans.length - completedCount;
+        
+        const dateDisplay = `${this.selectedDate.getFullYear()}年${this.selectedDate.getMonth() + 1}月${this.selectedDate.getDate()}日`;
         title.textContent = dateDisplay;
         
         if (dayPlans.length === 0) {
             plansContainer.innerHTML = `
-                <div class="empty-state">
-                    <div class="empty-state-icon">📅</div>
-                    <p>暂无计划安排</p>
+                <div class="day-detail-plans-header">
+                    <div class="day-detail-date">📅 ${dateDisplay}</div>
+                    <div class="day-detail-stats">
+                        <div class="day-stat-badge completed">✓ 已完成 0</div>
+                        <div class="day-stat-badge pending">○ 待执行 0</div>
+                    </div>
+                </div>
+                <div class="no-plans-state">
+                    <div class="no-plans-icon"><span>✨</span></div>
+                    <div class="no-plans-text">今天暂无计划安排</div>
+                    <div class="no-plans-hint">点击下方添加计划开始你的自律之旅</div>
                 </div>
             `;
         } else {
-            plansContainer.innerHTML = dayPlans.map(plan => {
+            const plansHtml = dayPlans.map(plan => {
                 const completionKey = `${dateStr}-${plan.id}`;
                 const isCompleted = this.completions[completionKey];
-                const canComplete = this.canCompletePlan(date);
+                const canComplete = this.canCompletePlan(this.selectedDate);
                 
                 return `
                     <div class="plan-item ${isCompleted ? 'completed' : ''}">
                         <div class="plan-item-header">
                             <span class="plan-item-title">${plan.title}</span>
-                            <span class="plan-item-status">${isCompleted ? '已完成' : '进行中'}</span>
+                            <span class="plan-item-status ${isCompleted ? 'tag-success' : 'tag-warning'} tag">
+                                ${isCompleted ? '✓ 已完成' : '○ 进行中'}
+                            </span>
                         </div>
                         <div class="plan-item-content">${plan.content || ''}</div>
                         <div class="plan-item-actions">
@@ -310,6 +587,17 @@ class SelfDisciplineApp {
                 `;
             }).join('');
             
+            plansContainer.innerHTML = `
+                <div class="day-detail-plans-header">
+                    <div class="day-detail-date">📅 ${dateDisplay}</div>
+                    <div class="day-detail-stats">
+                        <div class="day-stat-badge completed">✓ 已完成 ${completedCount}</div>
+                        <div class="day-stat-badge pending">○ 待执行 ${pendingCount}</div>
+                    </div>
+                </div>
+                ${plansHtml}
+            `;
+            
             plansContainer.querySelectorAll('.btn-complete').forEach(btn => {
                 btn.addEventListener('click', (e) => {
                     const planId = e.target.dataset.planId;
@@ -327,7 +615,7 @@ class SelfDisciplineApp {
             });
         }
         
-        modal.classList.add('active');
+        this.activateModal(modal);
     }
 
     canCompletePlan(date) {
@@ -339,34 +627,12 @@ class SelfDisciplineApp {
         return targetDate <= today;
     }
 
-    confirmCompletePlan(planId, date) {
-        this.currentPlanToComplete = { planId, date };
-        document.getElementById('confirmModal').classList.add('active');
-    }
-
-    completePlan() {
-        if (!this.currentPlanToComplete) return;
-        
-        const { planId, date } = this.currentPlanToComplete;
-        const completionKey = `${date}-${planId}`;
-        this.completions[completionKey] = true;
-        this.saveCompletions();
-        
-        document.getElementById('confirmModal').classList.remove('active');
-        
-        this.showEncourage();
-        
-        this.renderCalendar();
-        this.updateStats();
-        this.showDayDetail(this.selectedDate);
-        
-        this.currentPlanToComplete = null;
-    }
 
     showEncourage() {
+        const modal = document.getElementById('encourageModal');
         const randomMessage = encourageMessages[Math.floor(Math.random() * encourageMessages.length)];
         document.getElementById('encourageText').textContent = randomMessage;
-        document.getElementById('encourageModal').classList.add('active');
+        this.activateModal(modal);
     }
 
     checkYesterdayReminder() {
@@ -385,7 +651,7 @@ class SelfDisciplineApp {
         
         if (hasIncompleteYesterday) {
             const lastReminderKey = `reminder-${yesterdayStr}`;
-            const lastReminder = localStorage.getItem(lastReminderKey);
+            const lastReminder = this.safeLocalStorage('get', lastReminderKey);
             const todayStr = this.formatDate(today);
             
             if (lastReminder !== todayStr) {
@@ -393,78 +659,184 @@ class SelfDisciplineApp {
                     const randomMessage = reminderMessages[Math.floor(Math.random() * reminderMessages.length)];
                     document.getElementById('reminderText').textContent = randomMessage;
                     document.getElementById('reminderModal').classList.add('active');
-                    localStorage.setItem(lastReminderKey, todayStr);
+                    this.safeLocalStorage('set', lastReminderKey, todayStr);
                 }, 1000);
             }
         }
     }
 
     bindEventIfExists(elementId, handler) {
-        const element = document.getElementById(elementId);
-        if (element) {
-            element.addEventListener('click', handler);
+        try {
+            const element = document.getElementById(elementId);
+            if (element) {
+                element.addEventListener('click', (e) => {
+                    try {
+                        handler(e);
+                    } catch (error) {
+                        console.error('❌ 按钮事件处理错误:', elementId, error);
+                    }
+                });
+            }
+        } catch (error) {
+            console.error('❌ 绑定事件失败:', elementId, error);
         }
     }
 
+    verifyFunctions() {
+        const requiredFunctions = [
+            'openImportModal',
+            'openAdjustModal',
+            'openHistoryModal',
+            'openCancelModal',
+            'openPeriodicManageModal',
+            'openAnalysisModal',
+            'showDayDetail',
+            'renderCalendar'
+        ];
+        
+        let allOk = true;
+        requiredFunctions.forEach(funcName => {
+            if (typeof this[funcName] !== 'function') {
+                console.error('❌ 缺失关键函数:', funcName);
+                allOk = false;
+            }
+        });
+        
+        if (allOk) {
+            console.log('✅ 所有核心功能函数检查通过');
+        }
+    }
+
+    bindCloseButtons() {
+        const closeButtons = [
+            'closeImportModal',
+            'closeDayDetailModal',
+            'closeAdjustModal',
+            'closeAdjustSingleModal',
+            'closeHistoryModal',
+            'closeCancelModal',
+            'closePeriodicModal',
+            'closePeriodicAdjustModal'
+        ];
+        
+        closeButtons.forEach(btnId => {
+            this.bindEventIfExists(btnId, () => {
+                const modal = document.getElementById(btnId).closest('.modal');
+                if (modal) {
+                    this.deactivateModal(modal);
+                }
+            });
+        });
+        
+        this.bindEventIfExists('closeConfirm', () => {
+            const modal = document.getElementById('confirmModal');
+            modal.classList.remove('active');
+        });
+        
+        this.bindEventIfExists('closeBatchConfirm', () => {
+            const modal = document.getElementById('batchConfirmModal');
+            modal.classList.remove('active');
+        });
+    }
+
     bindEvents() {
-        const prevMonth = document.getElementById('prevMonth');
-        const nextMonth = document.getElementById('nextMonth');
-        const importPlanBtn = document.getElementById('importPlanBtn');
-        const adjustPlanBtn = document.getElementById('adjustPlanBtn');
-        const historyBtn = document.getElementById('historyBtn');
-        const cancelPlanBtn = document.getElementById('cancelPlanBtn');
+        const self = this;
         
-        if (prevMonth) {
-            prevMonth.addEventListener('click', () => {
-                this.currentDate.setMonth(this.currentDate.getMonth() - 1);
-                this.renderCalendar();
-            });
-        }
+        document.addEventListener('click', function(e) {
+            try {
+                const target = e.target.closest('button, [id]');
+                if (!target) return;
+                
+                if (target.id === 'confirmComplete' || target.id === 'cancelComplete' || target.classList.contains('btn-complete')) {
+                    return;
+                }
+                
+                if (target.classList.contains('btn-edit')) {
+                    const planId = target.dataset.planId;
+                    const date = target.dataset.date;
+                    self.openAdjustSingleModal(planId, date);
+                    return;
+                }
+                
+                if (target.classList.contains('btn-cancel-plan')) {
+                    const planId = target.dataset.planId;
+                    self.singleCancelPlan(planId);
+                    return;
+                }
+                
+                switch(target.id) {
+                    case 'prevMonth':
+                        self.currentDate.setMonth(self.currentDate.getMonth() - 1);
+                        self.renderCalendar();
+                        break;
+                    case 'nextMonth':
+                        self.currentDate.setMonth(self.currentDate.getMonth() + 1);
+                        self.renderCalendar();
+                        break;
+                    case 'importPlanBtn':
+                        self.openImportModal();
+                        break;
+                    case 'adjustPlanBtn':
+                        self.openAdjustModal();
+                        break;
+                    case 'historyBtn':
+                        self.openHistoryModal();
+                        break;
+                    case 'cancelPlanBtn':
+                        self.openCancelModal();
+                        break;
+                    case 'periodicManageBtn':
+                        self.openPeriodicManageModal();
+                        break;
+                    case 'analyticsBtn':
+                        self.openAnalysisModal();
+                        break;
+                    case 'addPlanBtn':
+                        self.showDayDetail(self.selectedDate || new Date());
+                        break;
+                    default:
+                        break;
+                }
+            } catch (error) {
+                console.error('❌ 按钮点击处理错误:', error, 'ID:', e.target.id);
+            }
+        });
         
-        if (nextMonth) {
-            nextMonth.addEventListener('click', () => {
-                this.currentDate.setMonth(this.currentDate.getMonth() + 1);
-                this.renderCalendar();
-            });
-        }
+        console.log('✅ 全局事件委托绑定成功 - 所有按钮支持动态渲染');
         
-        if (importPlanBtn) {
-            importPlanBtn.addEventListener('click', () => {
-                this.openImportModal();
-            });
-        }
-        
-        if (adjustPlanBtn) {
-            adjustPlanBtn.addEventListener('click', () => {
-                this.openAdjustModal();
-            });
-        }
-        
-        if (historyBtn) {
-            historyBtn.addEventListener('click', () => {
-                this.openHistoryModal();
-            });
-        }
-        
-        if (cancelPlanBtn) {
-            cancelPlanBtn.addEventListener('click', () => {
-                this.openCancelModal();
-            });
-        }
-        
-        const periodicManageBtn = document.getElementById('periodicManageBtn');
-        if (periodicManageBtn) {
-            periodicManageBtn.addEventListener('click', () => {
-                this.openPeriodicManageModal();
-            });
-        }
+        this.verifyFunctions();
+        this.bindCloseButtons();
         
         this.bindEventIfExists('selectAllBtn', () => this.toggleSelectAll());
         this.bindEventIfExists('deselectAllBtn', () => this.deselectAllPlans());
         this.bindEventIfExists('batchCancelBtn', () => this.batchCancelPlans());
         this.bindEventIfExists('cancelAllPlansBtn', () => this.cancelAllPlans());
         this.bindEventIfExists('applyFilterBtn', () => this.applyCancelFilter());
-        this.bindEventIfExists('cancelDateFilter', (e) => this.handleDateFilterChange(e));
+        
+        this.bindEventIfExists('batchCompleteBtn', () => this.batchCompletePlans());
+        this.bindEventIfExists('batchDeleteBtn', () => this.batchDeletePlans());
+        
+        const batchSelectAllPlans = document.getElementById('batchSelectAllPlans');
+        if (batchSelectAllPlans) {
+            batchSelectAllPlans.addEventListener('change', (e) => {
+                const batchSelectBtn = document.getElementById('batchSelectBtn');
+                if (e.target.checked) {
+                    batchSelectBtn.classList.add('active');
+                    document.body.classList.add('batch-select-mode');
+                } else {
+                    batchSelectBtn.classList.remove('active');
+                    document.body.classList.remove('batch-select-mode');
+                    this.deselectAllPlans();
+                }
+                this.togglePlanCheckboxes(e.target.checked);
+            });
+        }
+        
+        const cancelDateFilter = document.getElementById('cancelDateFilter');
+        if (cancelDateFilter) {
+            cancelDateFilter.addEventListener('change', (e) => this.handleDateFilterChange(e));
+        }
+        
         this.bindEventIfExists('cancelBatchConfirm', () => {
             document.getElementById('batchConfirmModal')?.classList.remove('active');
         });
@@ -477,18 +849,23 @@ class SelfDisciplineApp {
         this.bindEventIfExists('manualModeBtn', () => this.switchImportMode('manual'));
         this.bindEventIfExists('addAnotherPlan', () => this.addManualPlan(true));
         this.bindEventIfExists('confirmManualPlan', () => this.addManualPlan(false));
+        this.bindEventIfExists('clearImportForm', () => this.clearImportForm());
+        
+        document.querySelectorAll('.import-type-option').forEach(option => {
+            option.addEventListener('click', (e) => {
+                const type = e.currentTarget.dataset.type;
+                this.switchImportType(type);
+            });
+        });
         
         const manualIsPeriodic = document.getElementById('manualIsPeriodic');
         if (manualIsPeriodic) {
             manualIsPeriodic.addEventListener('change', (e) => {
-                const periodDaysGroup = document.getElementById('manualPeriodDaysGroup');
-                const periodDateRange = document.getElementById('manualPeriodDateRange');
+                const periodicOptions = document.getElementById('manualPeriodicOptions');
                 if (e.target.checked) {
-                    periodDaysGroup.style.display = 'block';
-                    periodDateRange.style.display = 'flex';
+                    periodicOptions.style.display = 'block';
                 } else {
-                    periodDaysGroup.style.display = 'none';
-                    periodDateRange.style.display = 'none';
+                    periodicOptions.style.display = 'none';
                 }
             });
         }
@@ -570,13 +947,6 @@ class SelfDisciplineApp {
         
         this.bindEventIfExists('confirmImport', () => this.importPlan());
         
-        this.bindEventIfExists('cancelComplete', () => {
-            document.getElementById('confirmModal')?.classList.remove('active');
-            this.currentPlanToComplete = null;
-        });
-        
-        this.bindEventIfExists('confirmComplete', () => this.completePlan());
-        
         this.bindEventIfExists('closeEncourage', () => {
             document.getElementById('encourageModal')?.classList.remove('active');
         });
@@ -592,10 +962,19 @@ class SelfDisciplineApp {
         
         this.bindEventIfExists('confirmAdjust', () => this.confirmAdjustPlan());
         
-        document.querySelectorAll('.modal').forEach(modal => {
+        document.querySelectorAll('.modal, .modal-overlay').forEach(modal => {
             modal.addEventListener('click', (e) => {
-                if (e.target === modal) {
-                    modal.classList.remove('active');
+                if (e.target === modal || e.target.classList.contains('modal-overlay')) {
+                    this.deactivateModal(e.target);
+                }
+            });
+        });
+        
+        document.querySelectorAll('.close-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const modal = e.target.closest('.modal');
+                if (modal) {
+                    this.deactivateModal(modal);
                 }
             });
         });
@@ -609,7 +988,7 @@ class SelfDisciplineApp {
         if (periodicPlans.length === 0) {
             listContainer.innerHTML = `
                 <div class="empty-state">
-                    <div class="empty-state-icon">🔄</div>
+                    <div class="empty-state-icon"></div>
                     <p>暂无周期性计划</p>
                 </div>
             `;
@@ -635,7 +1014,77 @@ class SelfDisciplineApp {
             });
         }
         
-        modal.classList.add('active');
+        this.activateModal(modal);
+    }
+
+    getOrCreateOverlay() {
+        let overlay = document.getElementById('globalModalOverlay');
+        
+        if (!overlay) {
+            overlay = document.createElement('div');
+            overlay.id = 'globalModalOverlay';
+            overlay.className = 'modal-overlay';
+            document.body.appendChild(overlay);
+            
+            overlay.addEventListener('click', (e) => {
+                if (e.target === overlay) {
+                    this.closeAllModals();
+                }
+            });
+        }
+        
+        return overlay;
+    }
+
+    activateModal(modalElement) {
+        this.closeAllModals();
+        
+        const overlay = this.getOrCreateOverlay();
+        overlay.appendChild(modalElement);
+        
+        modalElement.style.opacity = '0';
+        modalElement.style.transform = 'scale(0.9)';
+        modalElement.style.display = 'block';
+        
+        setTimeout(() => {
+            overlay.classList.add('active');
+            modalElement.style.opacity = '1';
+            modalElement.style.transform = 'scale(1)';
+        }, 50);
+        
+        this.currentOpenModal = modalElement;
+    }
+
+    deactivateModal(modalElement) {
+        const overlay = document.getElementById('globalModalOverlay');
+        if (overlay && overlay.contains(modalElement)) {
+            document.body.appendChild(modalElement);
+        }
+        
+        modalElement.style.display = 'none';
+        
+        if (overlay) {
+            overlay.classList.remove('active');
+        }
+        
+        this.currentOpenModal = null;
+    }
+
+    closeAllModals() {
+        const overlay = document.getElementById('globalModalOverlay');
+        
+        document.querySelectorAll('.modal').forEach(modal => {
+            modal.style.display = 'none';
+            if (overlay && overlay.contains(modal)) {
+                document.body.appendChild(modal);
+            }
+        });
+        
+        if (overlay) {
+            overlay.classList.remove('active');
+        }
+        
+        this.currentOpenModal = null;
     }
 
     openPeriodicAdjustModal(planId) {
@@ -643,14 +1092,15 @@ class SelfDisciplineApp {
         if (!plan) return;
         
         this.currentPeriodicPlan = plan;
+        const adjustModal = document.getElementById('periodicAdjustModal');
         
         document.getElementById('periodicPlanName').textContent = plan.title;
         document.getElementById('currentPeriod').textContent = `每${plan.periodDays}天 | 开始: ${plan.startDate}`;
         document.getElementById('newPeriodDays').value = plan.periodDays;
         document.getElementById('newStartDate').value = plan.startDate;
         
-        document.getElementById('periodicManageModal').classList.remove('active');
-        document.getElementById('periodicAdjustModal').classList.add('active');
+        this.closeAllModals();
+        this.activateModal(adjustModal);
     }
 
     confirmPeriodicAdjust() {
@@ -684,29 +1134,121 @@ class SelfDisciplineApp {
     }
 
     toggleSelectAll() {
-        const checkboxes = document.querySelectorAll('.plan-checkbox');
-        if (checkboxes.length === 0) {
+        const cancelCheckboxes = document.querySelectorAll('.cancel-plan-checkbox');
+        const planCheckboxes = document.querySelectorAll('.plan-checkbox');
+        
+        if (cancelCheckboxes.length > 0) {
+            const plans = this.filteredPlansForCancel || this.plans;
+            const allSelected = plans.every(p => this.selectedPlans.has(p.id));
+            
+            if (allSelected) {
+                plans.forEach(p => this.selectedPlans.delete(p.id));
+            } else {
+                plans.forEach(p => this.selectedPlans.add(p.id));
+            }
+            
+            cancelCheckboxes.forEach(cb => {
+                const planId = cb.dataset.planId;
+                cb.checked = this.selectedPlans.has(planId);
+                const item = cb.closest('.cancel-plan-item');
+                if (cb.checked) {
+                    item.classList.add('selected');
+                } else {
+                    item.classList.remove('selected');
+                }
+            });
+            
+            this.updateSelectedCount();
+        } else if (planCheckboxes.length > 0) {
+            const allChecked = Array.from(planCheckboxes).every(cb => cb.checked);
+            
+            planCheckboxes.forEach(cb => {
+                cb.checked = !allChecked;
+                const planId = cb.dataset.planId;
+                const item = cb.closest('.plan-item-checkbox');
+                
+                if (!allChecked) {
+                    this.selectedPlans.add(planId);
+                    item?.classList.add('selected');
+                } else {
+                    this.selectedPlans.delete(planId);
+                    item?.classList.remove('selected');
+                }
+            });
+            
+            this.updateSelectedCount();
+        } else {
             this.showToast('暂无可选择的计划');
+        }
+    }
+
+    togglePlanCheckboxes(show) {
+        const planItems = document.querySelectorAll('.plan-item');
+        planItems.forEach(item => {
+            const checkbox = item.querySelector('.plan-checkbox');
+            if (checkbox) {
+                checkbox.style.display = show ? 'block' : 'none';
+            }
+        });
+    }
+
+    batchCompletePlans() {
+        if (this.selectedPlans.size === 0) {
+            this.showToast('请先选择要完成的计划');
             return;
         }
         
-        const allChecked = Array.from(checkboxes).every(cb => cb.checked);
-        
-        checkboxes.forEach(cb => {
-            cb.checked = !allChecked;
-            const planId = cb.dataset.planId;
-            const item = cb.closest('.plan-item-checkbox');
-            
-            if (!allChecked) {
-                this.selectedPlans.add(planId);
-                item?.classList.add('selected');
-            } else {
-                this.selectedPlans.delete(planId);
-                item?.classList.remove('selected');
+        let completed = 0;
+        this.selectedPlans.forEach(planId => {
+            const plan = this.plans.find(p => p.id === planId);
+            if (plan && !plan.completed) {
+                plan.completed = true;
+                plan.completedAt = new Date().toISOString();
+                completed++;
             }
         });
         
-        this.updateSelectedCount();
+        this.savePlans();
+        this.renderCalendar();
+        this.updateStats();
+        const renderDate1 = this.selectedDate ? this.formatDate(this.selectedDate) : this.formatDate(new Date());
+        this.renderPlansForDate(renderDate1);
+        this.deselectAllPlans();
+        
+        document.getElementById('batchSelectAllPlans').checked = false;
+        document.getElementById('batchSelectBtn').classList.remove('active');
+        document.body.classList.remove('batch-select-mode');
+        this.togglePlanCheckboxes(false);
+        
+        this.showToast(`已批量完成 ${completed} 个计划`);
+        
+        if (completed > 0) {
+            this.checkAndShowEncourage();
+        }
+    }
+
+    batchDeletePlans() {
+        if (this.selectedPlans.size === 0) {
+            this.showToast('请先选择要删除的计划');
+            return;
+        }
+        
+        const deleted = this.selectedPlans.size;
+        this.plans = this.plans.filter(p => !this.selectedPlans.has(p.id));
+        
+        this.savePlans();
+        this.renderCalendar();
+        this.updateStats();
+        const renderDate2 = this.selectedDate ? this.formatDate(this.selectedDate) : this.formatDate(new Date());
+        this.renderPlansForDate(renderDate2);
+        this.deselectAllPlans();
+        
+        document.getElementById('batchSelectAllPlans').checked = false;
+        document.getElementById('batchSelectBtn').classList.remove('active');
+        document.body.classList.remove('batch-select-mode');
+        this.togglePlanCheckboxes(false);
+        
+        this.showToast(`已批量删除 ${deleted} 个计划`);
     }
 
     batchCancelPlans() {
@@ -832,7 +1374,29 @@ class SelfDisciplineApp {
         this.updateSelectedCount();
         this.renderCancelPlanList();
         
-        modal.classList.add('active');
+        this.activateModal(modal);
+    }
+
+    singleCancelPlan(planId) {
+        this.plans = this.plans.filter(p => p.id !== planId);
+        
+        Object.keys(this.completions).forEach(key => {
+            if (key.includes(planId)) {
+                delete this.completions[key];
+            }
+        });
+        
+        this.savePlans();
+        this.saveCompletions();
+        
+        this.selectedPlans.delete(planId);
+        this.filteredPlansForCancel = this.filteredPlansForCancel.filter(p => p.id !== planId);
+        
+        this.showToast('计划已取消');
+        this.renderCalendar();
+        this.updateStats();
+        this.renderCancelPlanList();
+        this.updateSelectedCount();
     }
 
     handleDateFilterChange(e) {
@@ -913,12 +1477,31 @@ class SelfDisciplineApp {
         const planList = document.getElementById('cancelPlanList');
         const plans = this.filteredPlansForCancel || this.plans;
         
+        const periodicCount = plans.filter(p => p.isPeriodic).length;
+        const singleCount = plans.length - periodicCount;
+        
         document.getElementById('filteredCount').textContent = plans.length;
         
         if (plans.length === 0) {
             planList.innerHTML = `
+                <div class="cancel-list-header">
+                    <div class="cancel-list-stats">
+                        <div class="cancel-stat-item">
+                            <span class="cancel-stat-value">${plans.length}</span>
+                            <span class="cancel-stat-label">总计划</span>
+                        </div>
+                        <div class="cancel-stat-item">
+                            <span class="cancel-stat-value">${singleCount}</span>
+                            <span class="cancel-stat-label">单次任务</span>
+                        </div>
+                        <div class="cancel-stat-item">
+                            <span class="cancel-stat-value">${periodicCount}</span>
+                            <span class="cancel-stat-label">周期任务</span>
+                        </div>
+                    </div>
+                </div>
                 <div class="empty-state">
-                    <div class="empty-state-icon">📋</div>
+                    <div class="empty-state-icon"></div>
                     <p>没有符合条件的计划</p>
                 </div>
             `;
@@ -927,7 +1510,7 @@ class SelfDisciplineApp {
         
         const sortedPlans = [...plans].sort((a, b) => a.date.localeCompare(b.date));
         
-        planList.innerHTML = sortedPlans.map(plan => `
+        const itemsHtml = sortedPlans.map(plan => `
             <div class="cancel-plan-item ${this.selectedPlans.has(plan.id) ? 'selected' : ''}" data-plan-id="${plan.id}">
                 <input type="checkbox" class="cancel-plan-checkbox" data-plan-id="${plan.id}" 
                     ${this.selectedPlans.has(plan.id) ? 'checked' : ''}>
@@ -935,15 +1518,40 @@ class SelfDisciplineApp {
                     <div class="cancel-plan-title">${this.escapeHtml(plan.title)}</div>
                     <div class="cancel-plan-meta">
                         <span class="cancel-plan-date">📅 ${plan.date}</span>
-                        <span class="cancel-plan-type ${plan.isPeriodic ? 'periodic' : ''}">
-                            ${plan.isPeriodic ? `周期性 | 每${plan.periodDays}天` : '单次任务'}
+                        <span class="cancel-plan-type ${plan.isPeriodic ? 'periodic' : ''} ${plan.isPeriodic ? 'tag-primary' : 'tag-success'} tag">
+                            ${plan.isPeriodic ? `🔄 每${plan.periodDays}天` : '● 单次任务'}
                         </span>
-                        ${plan.priority === 'high' ? '<span style="color: #ef4444;">🔴 高优先级</span>' : ''}
+                        ${plan.priority === 'high' ? '<span class="high-priority-badge">高优先级</span>' : ''}
                     </div>
                 </div>
                 <button class="btn-cancel-plan" data-plan-id="${plan.id}">取消</button>
             </div>
         `).join('');
+        
+        planList.innerHTML = `
+            <div class="cancel-list-header">
+                <div class="cancel-list-stats">
+                    <div class="cancel-stat-item">
+                        <span class="cancel-stat-value">${plans.length}</span>
+                        <span class="cancel-stat-label">总计划</span>
+                    </div>
+                    <div class="cancel-stat-item">
+                        <span class="cancel-stat-value">${singleCount}</span>
+                        <span class="cancel-stat-label">单次任务</span>
+                    </div>
+                    <div class="cancel-stat-item">
+                        <span class="cancel-stat-value">${periodicCount}</span>
+                        <span class="cancel-stat-label">周期任务</span>
+                    </div>
+                </div>
+                <div class="cancel-list-actions">
+                    <span class="selected-count-badge">
+                        已选择 ${this.selectedPlans.size} 项
+                    </span>
+                </div>
+            </div>
+            ${itemsHtml}
+        `;
         
         planList.querySelectorAll('.cancel-plan-checkbox').forEach(checkbox => {
             checkbox.addEventListener('change', (e) => {
@@ -991,34 +1599,11 @@ class SelfDisciplineApp {
         this.pendingCancelAll = true;
     }
 
-    toggleSelectAll() {
-        const plans = this.filteredPlansForCancel || this.plans;
-        const allSelected = plans.every(p => this.selectedPlans.has(p.id));
-        
-        if (allSelected) {
-            plans.forEach(p => this.selectedPlans.delete(p.id));
-        } else {
-            plans.forEach(p => this.selectedPlans.add(p.id));
-        }
-        
-        document.querySelectorAll('.cancel-plan-checkbox').forEach(cb => {
-            const planId = cb.dataset.planId;
-            cb.checked = this.selectedPlans.has(planId);
-            const item = cb.closest('.cancel-plan-item');
-            if (cb.checked) {
-                item.classList.add('selected');
-            } else {
-                item.classList.remove('selected');
-            }
-        });
-        
-        this.updateSelectedCount();
-    }
-
     updateSelectedCount() {
         const countEl = document.getElementById('selectedCount');
         const countDisplay = document.getElementById('selectedCountDisplay');
         const batchBtn = document.getElementById('batchCancelBtn');
+        const batchActionsBar = document.getElementById('batchActionsBar');
         
         if (countEl) {
             countEl.textContent = this.selectedPlans.size;
@@ -1026,6 +1611,10 @@ class SelfDisciplineApp {
         
         if (countDisplay) {
             countDisplay.textContent = this.selectedPlans.size;
+        }
+        
+        if (batchActionsBar) {
+            batchActionsBar.style.display = this.selectedPlans.size > 0 ? 'flex' : 'none';
         }
         
         if (batchBtn) {
@@ -1055,24 +1644,84 @@ class SelfDisciplineApp {
         const modal = document.getElementById('importModal');
         const today = new Date().toISOString().split('T')[0];
         
-        document.getElementById('startDate').value = today;
-        document.getElementById('planDate').value = today;
-        document.getElementById('goalStartDate').value = today;
+        document.getElementById('batchStartDate').value = today;
+        document.getElementById('periodicStartDate').value = today;
         document.getElementById('docStartDate').value = today;
+        document.getElementById('goalStartDate').value = today;
+        document.getElementById('manualPlanDate').value = today;
         document.getElementById('fileInput').value = '';
         document.getElementById('planPreview').style.display = 'none';
         document.getElementById('previewContent').textContent = '';
         document.getElementById('docPreview').style.display = 'none';
-        document.getElementById('manualPlanDate').value = today;
-        document.getElementById('manualPeriodStart').value = today;
+        document.getElementById('uploadArea').style.display = 'block';
         this.pendingPlanData = null;
         this.pendingDocPlans = null;
         this.pendingManualPlans = [];
         
-        this.switchTab('single');
         this.switchImportMode('upload');
+        this.switchImportType('batch');
         
-        modal.classList.add('active');
+        this.activateModal(modal);
+    }
+
+    switchImportType(type) {
+        document.querySelectorAll('.import-type-option').forEach(opt => {
+            opt.classList.remove('active');
+        });
+        
+        const selectedOption = document.querySelector(`.import-type-option[data-type="${type}"]`);
+        if (selectedOption) {
+            selectedOption.classList.add('active');
+            selectedOption.querySelector('input').checked = true;
+        }
+        
+        const configSections = ['batchConfig', 'periodicConfig', 'smartdocConfig', 'longtermConfig'];
+        configSections.forEach(sectionId => {
+            const section = document.getElementById(sectionId);
+            if (section) {
+                section.style.display = 'none';
+            }
+        });
+        
+        const typeToConfig = {
+            'batch': 'batchConfig',
+            'periodic': 'periodicConfig',
+            'smartdoc': 'smartdocConfig',
+            'longterm': 'longtermConfig'
+        };
+        
+        const configId = typeToConfig[type];
+        if (configId) {
+            const configSection = document.getElementById(configId);
+            if (configSection) {
+                configSection.style.display = 'block';
+            }
+        }
+        
+        const uploadArea = document.getElementById('uploadArea');
+        if (uploadArea) {
+            if (type === 'smartdoc') {
+                uploadArea.style.display = 'block';
+            } else {
+                uploadArea.style.display = 'none';
+            }
+        }
+        
+        this.currentImportType = type;
+    }
+
+    clearImportForm() {
+        document.getElementById('batchPlanContent').value = '';
+        document.getElementById('periodicPlanContent').value = '';
+        document.getElementById('goalName').value = '';
+        document.getElementById('subTasks').value = '';
+        document.getElementById('planPreview').style.display = 'none';
+        document.getElementById('docPreview').style.display = 'none';
+        document.getElementById('uploadArea').style.display = 'block';
+        document.getElementById('fileInput').value = '';
+        this.pendingPlanData = null;
+        this.pendingDocPlans = null;
+        this.showToast('表单已清空');
     }
 
     switchImportMode(mode) {
@@ -1104,7 +1753,6 @@ class SelfDisciplineApp {
         const priority = document.getElementById('manualPlanPriority').value;
         const isPeriodic = document.getElementById('manualIsPeriodic').checked;
         const periodDays = parseInt(document.getElementById('manualPeriodDays').value) || 7;
-        const periodStart = document.getElementById('manualPeriodStart').value;
         const periodEnd = document.getElementById('manualPeriodEnd').value;
         
         if (!date) {
@@ -1121,11 +1769,10 @@ class SelfDisciplineApp {
             id: Date.now().toString(),
             date: date,
             title: title,
-            content: content,
+            content: content || title,
             priority: priority,
             isPeriodic: isPeriodic,
             periodDays: isPeriodic ? periodDays : 0,
-            periodStart: isPeriodic ? periodStart : null,
             periodEnd: isPeriodic ? periodEnd : null,
             completed: false
         };
@@ -1151,6 +1798,7 @@ class SelfDisciplineApp {
     renderPendingManualPlans() {
         const container = document.getElementById('pendingPlans');
         const listContainer = document.getElementById('manualPlansList');
+        const countSpan = document.getElementById('pendingCount');
         
         if (!this.pendingManualPlans || this.pendingManualPlans.length === 0) {
             listContainer.style.display = 'none';
@@ -1158,6 +1806,13 @@ class SelfDisciplineApp {
         }
         
         listContainer.style.display = 'block';
+        countSpan.textContent = `(${this.pendingManualPlans.length})`;
+        
+        const priorityLabels = {
+            'high': '高优先级',
+            'medium': '普通',
+            'low': '低优先级'
+        };
         
         container.innerHTML = this.pendingManualPlans.map((plan, index) => `
             <div class="pending-plan-item">
@@ -1165,7 +1820,7 @@ class SelfDisciplineApp {
                     <div class="pending-plan-title">${plan.title}</div>
                     <div class="pending-plan-meta">
                         <span>📅 ${plan.date}</span>
-                        <span>🏷️ ${plan.priority === 'high' ? '高优先级' : plan.priority === 'low' ? '低优先级' : '普通'}</span>
+                        <span>🏷️ ${priorityLabels[plan.priority] || '普通'}</span>
                         ${plan.isPeriodic ? `<span>🔄 每${plan.periodDays}天</span>` : ''}
                     </div>
                 </div>
@@ -1249,6 +1904,13 @@ class SelfDisciplineApp {
     handleFileUpload(file) {
         const fileName = file.name.toLowerCase();
         
+        this.switchImportType('smartdoc');
+        
+        const uploadArea = document.getElementById('uploadArea');
+        if (uploadArea) {
+            uploadArea.style.display = 'none';
+        }
+        
         if (fileName.endsWith('.txt') || fileName.endsWith('.md')) {
             this.handleTextFile(file);
         } else if (fileName.endsWith('.docx')) {
@@ -1257,6 +1919,9 @@ class SelfDisciplineApp {
             this.handlePdfFile(file);
         } else {
             this.showToast('不支持的文件格式，请上传 .txt, .md, .docx 或 .pdf 文件');
+            if (uploadArea) {
+                uploadArea.style.display = 'block';
+            }
         }
     }
 
@@ -1264,11 +1929,7 @@ class SelfDisciplineApp {
         const reader = new FileReader();
         reader.onload = (e) => {
             const content = e.target.result;
-            if (this.currentTab === 'smartdoc') {
-                this.parseSmartDocument(content);
-            } else {
-                this.parsePlanContent(content);
-            }
+            this.parseSmartDocument(content);
         };
         reader.readAsText(file);
     }
@@ -1279,12 +1940,7 @@ class SelfDisciplineApp {
         try {
             const arrayBuffer = await file.arrayBuffer();
             const text = await this.extractDocxText(arrayBuffer);
-            
-            if (this.currentTab === 'smartdoc') {
-                this.parseSmartDocument(text);
-            } else {
-                this.parsePlanContent(text);
-            }
+            this.parseSmartDocument(text);
         } catch (error) {
             console.error('DOCX解析错误:', error);
             this.showToast('DOCX文件解析失败，请尝试上传TXT格式');
@@ -1297,12 +1953,7 @@ class SelfDisciplineApp {
         try {
             const arrayBuffer = await file.arrayBuffer();
             const text = await this.extractPdfText(arrayBuffer);
-            
-            if (this.currentTab === 'smartdoc') {
-                this.parseSmartDocument(text);
-            } else {
-                this.parsePlanContent(text);
-            }
+            this.parseSmartDocument(text);
         } catch (error) {
             console.error('PDF解析错误:', error);
             this.showToast('PDF文件解析失败，请尝试上传TXT格式');
@@ -1340,7 +1991,7 @@ class SelfDisciplineApp {
     }
 
     tryParseTrainingPlan(lines) {
-        const baseDateStr = document.getElementById('docStartDate').value;
+        const baseDateStr = document.getElementById('docStartDate')?.value;
         const baseDate = baseDateStr ? new Date(baseDateStr) : new Date();
         
         let hasTrainingFormat = false;
@@ -1361,6 +2012,8 @@ class SelfDisciplineApp {
         const stats = {
             totalLines: lines.length,
             recognizedLines: 0,
+            validLines: 0,
+            skippedLines: 0,
             dateRecognized: 0,
             periodRecognized: 0,
             priorityRecognized: 0,
@@ -1374,65 +2027,149 @@ class SelfDisciplineApp {
         let currentDate = new Date(baseDate);
         
         const phasePatterns = [
-            { pattern: /【热身[^】]*】|热身激活|热身/, name: '热身激活' },
-            { pattern: /【主训[^】]*】|主训|力量训练|训练/, name: '主训练' },
-            { pattern: /【体态[^】]*】|体态收尾|体态/, name: '体态收尾' },
-            { pattern: /【冷身[^】]*】|冷身拉伸|拉伸|放松/, name: '拉伸放松' },
-            { pattern: /【全程[^】]*】|全程/, name: '全程' }
+            { pattern: /^【热身[^】]*】|热身激活$|^热身$/, name: '热身激活' },
+            { pattern: /^【主训[^】]*】|主训$|^力量训练$|^训练$/, name: '主训练' },
+            { pattern: /^【体态[^】]*】|体态收尾$|^体态$/, name: '体态收尾' },
+            { pattern: /^【冷身[^】]*】|冷身拉伸$|^拉伸$|^放松$/, name: '拉伸放松' },
+            { pattern: /^【全程[^】]*】|全程$/, name: '全程' }
         ];
         
+        const skipPatterns = [
+            /^总时长/,
+            /^时长[：:]/,
+            /^【[^】]*】$/
+        ];
+        
+        const exercisePatterns = [
+            /^(.+?)\s+(\d+\s*[组×xX]\s*\d+[-~]?\d*\s*次)/,
+            /^(.+?)\s+(\d+\s*[组×xX]\s*\d+\s*次)/,
+            /^(.+?)\s+(\d+)\s*分钟/,
+            /^(.+?)\s+(\d+)\s*秒/,
+            /^(.+?)\s+(\d+)\s*次/,
+            /^(.+?)\s+(\d+\s*[组×xX]\s*\d+[-~]?\d*\s*次\s*[\/／]\s*侧)/,
+            /^(.+?)\s+(\d+\s*[组×xX]\s*\d+\s*次\s*[\/／]\s*侧)/,
+            /^(.+?)\s+(各\s*\d+\s*秒)/,
+            /^(.+?)\s+(各\s*\d+\s*分钟)/,
+            /^(.+?)\s+(\d+\s*[组×xX]\s*\d+[-~]?\d*\s*次\s*[\/／]\s*组)/,
+            /^(.+?)\s+(\d+)\s*分钟\s*[×xX]\s*\d+\s*组/,
+            /^(.+?)\s+(\d+)\s*秒\s*[×xX]\s*\d+\s*组/,
+            /^(.+?)\s+(\d+)\s*秒\s*[×xX]\s*\d+\s*组\s*[\/／]\s*侧/,
+            /^(.+?)\s+(\d+)\s*分钟\s*[×xX]\s*\d+\s*组\s*[\/／]\s*侧/,
+            /^(.+?)\s+(\d+)\s*分钟\s*[×xX]\s*\d+\s*组/,
+            /^(.+?)\s+(\d+)\s*秒\s*[×xX]\s*\d+\s*组/
+        ];
+        
+        const simpleTimePattern = /^(.+?)\s+(\d+)\s*(分钟|秒|次)(?:\s*[×xX]\s*\d+\s*组)?(?:\s*[\/／]\s*(?:侧|组))?\s*$/;
+        const timeWithGroupPattern = /^(.+?)\s+(\d+)\s*(分钟|秒)\s*[×xX]\s*\d+\s*组(?:\s*[\/／]\s*侧)?/;
+        const looseTimePattern = /^(.+?)\s+(\d+)\s*(分钟|秒|次)\s*(?:[×xX]\s*\d+\s*组)?(?:\s*[\/／]\s*(?:侧|组))?\s*$/;
+        
         for (let i = 0; i < lines.length; i++) {
-            const line = lines[i].trim();
-            if (!line) continue;
-            
-            const dayMatch = line.match(/\*\*第([一二三四五六七八九十\d]+)天[：:）\s]*(.*)/) || 
-                            line.match(/第([一二三四五六七八九十\d]+)天[：:）\s]*(.*)/);
-            
-            if (dayMatch) {
-                currentDay = this.chineseToNumber(dayMatch[1]);
-                currentDayTitle = dayMatch[2] ? dayMatch[2].replace(/\*\*/g, '').trim() : '';
-                currentDate = new Date(baseDate);
-                currentDate.setDate(currentDate.getDate() + currentDay - 1);
-                stats.trainingDays++;
+            let line = lines[i].trim();
+            line = line.replace(/[\u00A0\u2000-\u200B\u202F\u205F\u3000]/g, ' ');
+            line = line.replace(/\s+/g, ' ');
+            if (!line) {
+                stats.skippedLines++;
                 continue;
             }
             
-            if (currentDay === 0) continue;
+            const dayMatch = line.match(/第([一二三四五六七八九十\d]+)天/);
+            
+            if (dayMatch) {
+                currentDay = this.chineseToNumber(dayMatch[1]);
+                currentDayTitle = line.replace(/\*\*/g, '').trim();
+                currentDate = new Date(baseDate);
+                currentDate.setDate(currentDate.getDate() + currentDay - 1);
+                stats.trainingDays++;
+                stats.skippedLines++;
+                continue;
+            }
+            
+            if (currentDay === 0) {
+                stats.skippedLines++;
+                continue;
+            }
             
             let foundPhase = false;
             for (const pp of phasePatterns) {
                 if (pp.pattern.test(line)) {
                     currentPhase = pp.name;
                     foundPhase = true;
+                    stats.skippedLines++;
                     break;
                 }
             }
             
             if (foundPhase) continue;
             
-            if (/^总时长|^重点事项|^说明|^---|^\*\*[^第]/.test(line)) continue;
-            
-            const exerciseMatch = line.match(/^[-*•·]?\s*(.+?)\s+(\d+\s*[组×xXx]\s*\d+[-~]?\d*\s*次|\d+\s*[组×xXx]\s*\d+\s*次|\d+\s*分钟|\d+\s*秒|\d+\s*次)/);
-            
-            if (exerciseMatch) {
-                const exerciseName = exerciseMatch[1].trim();
-                const details = line.substring(exerciseMatch[0].indexOf(exerciseName) + exerciseName.length).trim();
-                
-                if (exerciseName.length < 2 || /^[-*•·\s]+$/.test(exerciseName)) continue;
-                
-                let priority = 'medium';
-                if (currentPhase === '主训练' || currentPhase === '全程') {
-                    priority = 'high';
-                } else if (currentPhase === '拉伸放松' || currentPhase === '休息恢复') {
-                    priority = 'low';
+            let shouldSkip = false;
+            for (const sp of skipPatterns) {
+                if (sp.test(line)) {
+                    shouldSkip = true;
+                    stats.skippedLines++;
+                    break;
                 }
-                
+            }
+            
+            if (shouldSkip) continue;
+            
+            stats.validLines++;
+            
+            const hasTimeUnit = line.includes('分钟') || line.includes('秒') || line.includes('次');
+            
+            if (hasTimeUnit) {
+                const timeMatch = line.match(/(\d+)\s*(分钟|秒|次)/);
+                if (timeMatch) {
+                    const timePos = line.indexOf(timeMatch[0]);
+                    let exerciseName = line.substring(0, timePos).trim();
+                    
+                    if (!exerciseName) {
+                        exerciseName = line;
+                    }
+                    
+                    let priority = 'medium';
+                    if (currentPhase === '主训练' || currentPhase === '全程') {
+                        priority = 'high';
+                    } else if (currentPhase === '拉伸放松' || currentPhase === '休息恢复') {
+                        priority = 'low';
+                    }
+                    
+                    const plan = {
+                        id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
+                        title: exerciseName,
+                        content: line,
+                        date: this.formatDate(currentDate),
+                        priority: priority,
+                        isPeriodic: false,
+                        periodDays: null,
+                        startDate: this.formatDate(currentDate),
+                        createdAt: new Date().toISOString(),
+                        dayNumber: currentDay,
+                        dayTitle: currentDayTitle,
+                        phase: currentPhase,
+                        details: timeMatch[0],
+                        recognitionInfo: {
+                            dateFound: true,
+                            periodFound: false,
+                            priorityFound: true,
+                            trainingPlan: true
+                        }
+                    };
+                    
+                    plans.push(plan);
+                    stats.recognizedLines++;
+                    stats.exercises++;
+                    stats.dateRecognized++;
+                    continue;
+                }
+            }
+            
+            if (line.length >= 4 && !/^[【】\s]+$/.test(line) && !line.includes('总时长') && !line.includes('时长：')) {
                 const plan = {
                     id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
-                    title: exerciseName,
+                    title: line.substring(0, 50),
                     content: line,
                     date: this.formatDate(currentDate),
-                    priority: priority,
+                    priority: 'medium',
                     isPeriodic: false,
                     periodDays: null,
                     startDate: this.formatDate(currentDate),
@@ -1440,11 +2177,10 @@ class SelfDisciplineApp {
                     dayNumber: currentDay,
                     dayTitle: currentDayTitle,
                     phase: currentPhase,
-                    details: details,
                     recognitionInfo: {
                         dateFound: true,
                         periodFound: false,
-                        priorityFound: true,
+                        priorityFound: false,
                         trainingPlan: true
                     }
                 };
@@ -1452,7 +2188,8 @@ class SelfDisciplineApp {
                 plans.push(plan);
                 stats.recognizedLines++;
                 stats.exercises++;
-                stats.dateRecognized++;
+            } else {
+                stats.skippedLines++;
             }
         }
         
@@ -1460,9 +2197,9 @@ class SelfDisciplineApp {
             return null;
         }
         
-        const accuracy = stats.totalLines > 0 
-            ? Math.min(100, Math.round((stats.recognizedLines / stats.totalLines) * 150))
-            : 0;
+        const accuracy = stats.validLines > 0 
+            ? Math.min(100, Math.round((stats.recognizedLines / stats.validLines) * 100))
+            : Math.min(100, Math.round((stats.recognizedLines / (stats.totalLines - stats.skippedLines)) * 100));
         
         return {
             plans: plans,
@@ -1507,10 +2244,12 @@ class SelfDisciplineApp {
             priorityRecognized: 0
         };
         
-        const baseDateStr = document.getElementById('docStartDate').value;
+        const baseDateStr = document.getElementById('docStartDate')?.value;
         const baseDate = baseDateStr ? new Date(baseDateStr) : new Date();
-        const defaultPeriod = parseInt(document.getElementById('defaultPeriod').value);
-        const autoDetectPeriod = document.getElementById('autoDetectPeriod').checked;
+        const defaultPeriodElement = document.getElementById('defaultPeriod');
+        const defaultPeriod = defaultPeriodElement ? parseInt(defaultPeriodElement.value) : 7;
+        const autoDetectPeriodElement = document.getElementById('autoDetectPeriod');
+        const autoDetectPeriod = autoDetectPeriodElement ? autoDetectPeriodElement.checked : true;
         
         const datePatterns = [
             { pattern: /(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})日?/, type: 'full' },
@@ -1986,15 +2725,173 @@ class SelfDisciplineApp {
     }
 
     importPlan() {
-        if (this.currentTab === 'single') {
-            this.importSinglePlan();
-        } else if (this.currentTab === 'periodic') {
-            this.importPeriodicPlan();
-        } else if (this.currentTab === 'longterm') {
-            this.importLongtermGoal();
-        } else if (this.currentTab === 'smartdoc') {
+        if (this.currentImportType === 'batch') {
+            this.importBatchPlans();
+        } else if (this.currentImportType === 'periodic') {
+            this.importPeriodicPlans();
+        } else if (this.currentImportType === 'smartdoc') {
             this.importSmartDocPlans();
+        } else if (this.currentImportType === 'longterm') {
+            this.importLongtermGoal();
         }
+    }
+
+    importBatchPlans() {
+        const startDate = document.getElementById('batchStartDate').value;
+        const endDate = document.getElementById('batchEndDate').value;
+        const content = document.getElementById('batchPlanContent').value.trim();
+        const priority = document.getElementById('batchPriority').value;
+        
+        if (!startDate) {
+            this.showToast('请选择开始日期');
+            return;
+        }
+        
+        if (!content) {
+            this.showToast('请输入计划内容');
+            return;
+        }
+        
+        const tasks = content.split('\n').filter(line => line.trim());
+        if (tasks.length === 0) {
+            this.showToast('请输入至少一个任务');
+            return;
+        }
+        
+        let importedCount = 0;
+        
+        if (endDate) {
+            const start = new Date(startDate);
+            const end = new Date(endDate);
+            
+            if (end < start) {
+                this.showToast('结束日期不能早于开始日期');
+                return;
+            }
+            
+            const currentDate = new Date(start);
+            while (currentDate <= end) {
+                tasks.forEach(task => {
+                    const plan = {
+                        id: this.generateId(),
+                        title: task.trim(),
+                        content: task.trim(),
+                        date: this.formatDate(currentDate),
+                        priority: priority,
+                        completed: false,
+                        createdAt: new Date().toISOString()
+                    };
+                    
+                    if (!this.plans.some(p => p.date === plan.date && p.title === plan.title)) {
+                        this.plans.push(plan);
+                        importedCount++;
+                    }
+                });
+                currentDate.setDate(currentDate.getDate() + 1);
+            }
+        } else {
+            tasks.forEach(task => {
+                const plan = {
+                    id: this.generateId(),
+                    title: task.trim(),
+                    content: task.trim(),
+                    date: startDate,
+                    priority: priority,
+                    completed: false,
+                    createdAt: new Date().toISOString()
+                };
+                
+                if (!this.plans.some(p => p.date === plan.date && p.title === plan.title)) {
+                    this.plans.push(plan);
+                    importedCount++;
+                }
+            });
+        }
+        
+        this.savePlans();
+        this.renderCalendar();
+        this.updateStats();
+        this.closeImportModal();
+        this.showToast(`成功导入 ${importedCount} 个计划`);
+    }
+
+    importPeriodicPlans() {
+        const startDate = document.getElementById('periodicStartDate').value;
+        const endDate = document.getElementById('periodicEndDate').value;
+        const periodDays = parseInt(document.getElementById('periodicDays').value);
+        const content = document.getElementById('periodicPlanContent').value.trim();
+        const priority = document.getElementById('periodicPriority').value;
+        
+        if (!startDate) {
+            this.showToast('请选择开始日期');
+            return;
+        }
+        
+        if (!content) {
+            this.showToast('请输入计划内容');
+            return;
+        }
+        
+        const tasks = content.split('\n').filter(line => line.trim());
+        if (tasks.length === 0) {
+            this.showToast('请输入至少一个任务');
+            return;
+        }
+        
+        let importedCount = 0;
+        
+        tasks.forEach(task => {
+            const basePlan = {
+                title: task.trim(),
+                content: task.trim(),
+                priority: priority,
+                completed: false
+            };
+            
+            if (endDate) {
+                const start = new Date(startDate);
+                const end = new Date(endDate);
+                let currentDate = new Date(start);
+                
+                while (currentDate <= end) {
+                    const plan = {
+                        ...basePlan,
+                        id: this.generateId(),
+                        date: this.formatDate(currentDate),
+                        isPeriodic: true,
+                        periodDays: periodDays,
+                        createdAt: new Date().toISOString()
+                    };
+                    
+                    if (!this.plans.some(p => p.date === plan.date && p.title === plan.title)) {
+                        this.plans.push(plan);
+                        importedCount++;
+                    }
+                    
+                    currentDate.setDate(currentDate.getDate() + periodDays);
+                }
+            } else {
+                const plan = {
+                    ...basePlan,
+                    id: this.generateId(),
+                    date: startDate,
+                    isPeriodic: true,
+                    periodDays: periodDays,
+                    createdAt: new Date().toISOString()
+                };
+                
+                if (!this.plans.some(p => p.date === plan.date && p.title === plan.title)) {
+                    this.plans.push(plan);
+                    importedCount++;
+                }
+            }
+        });
+        
+        this.savePlans();
+        this.renderCalendar();
+        this.updateStats();
+        this.closeImportModal();
+        this.showToast(`成功导入 ${importedCount} 个周期性计划`);
     }
 
     importSmartDocPlans() {
@@ -2240,7 +3137,7 @@ class SelfDisciplineApp {
         if (nonPeriodicPlans.length === 0) {
             adjustList.innerHTML = `
                 <div class="empty-state">
-                    <div class="empty-state-icon">📋</div>
+                    <div class="empty-state-icon"></div>
                     <p>暂无可调整的计划</p>
                 </div>
             `;
@@ -2269,7 +3166,7 @@ class SelfDisciplineApp {
             });
         }
         
-        modal.classList.add('active');
+        this.activateModal(modal);
     }
 
     openAdjustSingleModal(planId, currentDate) {
@@ -2277,13 +3174,14 @@ class SelfDisciplineApp {
         if (!plan) return;
         
         this.currentAdjustPlan = { plan, currentDate };
+        const singleModal = document.getElementById('adjustSingleModal');
         
         document.getElementById('adjustTaskName').textContent = plan.title;
         document.getElementById('newDate').value = currentDate;
         document.getElementById('adjustReason').value = '';
         
-        document.getElementById('adjustModal').classList.remove('active');
-        document.getElementById('adjustSingleModal').classList.add('active');
+        this.closeAllModals();
+        this.activateModal(singleModal);
     }
 
     confirmAdjustPlan() {
@@ -2347,7 +3245,7 @@ class SelfDisciplineApp {
         if (this.adjustHistory.length === 0) {
             historyList.innerHTML = `
                 <div class="empty-state">
-                    <div class="empty-state-icon">📜</div>
+                    <div class="empty-state-icon"></div>
                     <p>暂无调整记录</p>
                 </div>
             `;
@@ -2377,122 +3275,101 @@ class SelfDisciplineApp {
             }).join('');
         }
         
-        modal.classList.add('active');
+        this.activateModal(modal);
     }
 
-    openCancelModal() {
-        const modal = document.getElementById('cancelPlanModal');
-        const planList = document.getElementById('cancelPlanList');
-        
-        if (this.plans.length === 0) {
-            planList.innerHTML = `
-                <div class="empty-state">
-                    <div class="empty-state-icon">📋</div>
-                    <p>暂无可取消的计划</p>
-                </div>
-            `;
-        } else {
-            planList.innerHTML = this.plans.map(plan => `
-                <div class="cancel-plan-item">
-                    <div class="cancel-plan-info">
-                        <div class="cancel-plan-title">${plan.title}</div>
-                        <div class="cancel-plan-date">
-                            ${plan.isPeriodic 
-                                ? `周期性计划 | 每${plan.periodDays}天` 
-                                : `日期: ${plan.date}`}
-                            ${plan.isFromGoal ? ` | 目标: ${plan.goalName}` : ''}
-                        </div>
-                    </div>
-                    <button class="btn-cancel-plan" data-plan-id="${plan.id}">取消</button>
-                </div>
-            `).join('');
-            
-            planList.querySelectorAll('.btn-cancel-plan').forEach(btn => {
-                btn.addEventListener('click', (e) => {
-                    const planId = e.target.dataset.planId;
-                    this.cancelPlan(planId);
-                });
-            });
-        }
-        
-        modal.classList.add('active');
-    }
-
-    cancelPlan(planId) {
-        this.plans = this.plans.filter(p => p.id !== planId);
-        
-        Object.keys(this.completions).forEach(key => {
-            if (key.includes(planId)) {
-                delete this.completions[key];
+    safeLocalStorage(action, key, value = null) {
+        try {
+            if (action === 'get') {
+                const saved = localStorage.getItem(key);
+                return saved ? JSON.parse(saved) : null;
+            } else if (action === 'set') {
+                localStorage.setItem(key, JSON.stringify(value));
+                return true;
             }
-        });
-        
-        this.savePlans();
-        this.saveCompletions();
-        
-        this.selectedPlans.delete(planId);
-        this.filteredPlansForCancel = this.filteredPlansForCancel.filter(p => p.id !== planId);
-        
-        this.showToast('计划已取消');
-        this.renderCalendar();
-        this.updateStats();
-        this.renderCancelPlanList();
-        this.updateSelectedCount();
+        } catch (error) {
+            console.warn('⚠️ localStorage操作失败:', error.message);
+            if (action === 'get') {
+                return null;
+            }
+            return false;
+        }
     }
 
     loadPlans() {
-        const saved = localStorage.getItem('selfDisciplinePlans');
-        return saved ? JSON.parse(saved) : [];
+        const saved = this.safeLocalStorage('get', 'selfDisciplinePlans');
+        return saved || [];
     }
 
     savePlans() {
-        localStorage.setItem('selfDisciplinePlans', JSON.stringify(this.plans));
+        this.safeLocalStorage('set', 'selfDisciplinePlans', this.plans);
     }
 
     loadCompletions() {
-        const saved = localStorage.getItem('selfDisciplineCompletions');
-        return saved ? JSON.parse(saved) : {};
+        const saved = this.safeLocalStorage('get', 'selfDisciplineCompletions');
+        return saved || {};
     }
 
     saveCompletions() {
-        localStorage.setItem('selfDisciplineCompletions', JSON.stringify(this.completions));
+        this.safeLocalStorage('set', 'selfDisciplineCompletions', this.completions);
     }
 
     loadAdjustHistory() {
-        const saved = localStorage.getItem('selfDisciplineAdjustHistory');
-        return saved ? JSON.parse(saved) : [];
+        const saved = this.safeLocalStorage('get', 'selfDisciplineAdjustHistory');
+        return saved || [];
     }
 
     saveAdjustHistory() {
-        localStorage.setItem('selfDisciplineAdjustHistory', JSON.stringify(this.adjustHistory));
+        this.safeLocalStorage('set', 'selfDisciplineAdjustHistory', this.adjustHistory);
     }
 
-    showToast(message) {
-        const toast = document.getElementById('toast');
-        toast.textContent = message;
-        toast.classList.add('show');
+    showToast(message, type = 'success') {
+        const existingToast = document.querySelector('.toast-notification');
+        if (existingToast) {
+            existingToast.remove();
+        }
+        
+        const toast = document.createElement('div');
+        toast.className = `toast-notification ${type}`;
+        
+        const icons = {
+            success: '✓',
+            error: '✕',
+            info: 'ℹ'
+        };
+        
+        toast.innerHTML = `
+            <span>${icons[type] || 'ℹ'}</span>
+            <span>${message}</span>
+        `;
+        
+        document.body.appendChild(toast);
         
         setTimeout(() => {
-            toast.classList.remove('show');
-        }, 3000);
+            toast.style.animation = 'fadeOut 0.3s ease forwards';
+            setTimeout(() => toast.remove(), 300);
+        }, 2500);
     }
 
     openAnalysisModal() {
+        const modal = document.getElementById('analysisModal');
         this.analysisDate = new Date();
         this.updateAnalysisView();
         this.updateWeeklyReport();
         this.updateSuggestions();
-        document.getElementById('analysisModal').classList.add('active');
         
-        document.querySelectorAll('.analysis-tabs .tab-btn').forEach(btn => {
+        document.querySelectorAll('.analysis-tabs .analysis-tab').forEach(btn => {
             btn.addEventListener('click', (e) => {
-                this.switchAnalysisTab(e.target.dataset.tab);
+                const target = e.target.closest('.analysis-tab');
+                this.switchAnalysisTab(target.dataset.tab);
             });
         });
+        
+        this.activateModal(modal);
     }
 
     switchAnalysisTab(tabName) {
-        document.querySelectorAll('.analysis-tabs .tab-btn').forEach(btn => {
+        document.querySelectorAll('.analysis-tabs .analysis-tab').forEach(btn => {
             btn.classList.toggle('active', btn.dataset.tab === tabName);
         });
         
@@ -2516,17 +3393,21 @@ class SelfDisciplineApp {
         const completedPlans = this.getCompletedPlansForDate(dateStr);
         const pendingPlans = dayPlans.filter(p => !completedPlans.includes(p));
         
-        document.getElementById('dayTotalTasks').textContent = dayPlans.length;
-        document.getElementById('dayCompletedTasks').textContent = completedPlans.length;
-        document.getElementById('dayPendingTasks').textContent = pendingPlans.length;
-        
         const rate = dayPlans.length > 0 
             ? Math.round((completedPlans.length / dayPlans.length) * 100) 
             : 0;
+        
+        document.getElementById('dayTotalTasks').textContent = dayPlans.length;
+        document.getElementById('dayCompletedTasks').textContent = completedPlans.length;
+        document.getElementById('dayPendingTasks').textContent = pendingPlans.length;
         document.getElementById('dayCompletionRate').textContent = `${rate}%`;
         
+        document.getElementById('dailyProgressBar').style.width = `${rate}%`;
+        document.getElementById('dailyProgressPercent').textContent = `${rate}%`;
+        
+        this.renderWeeklyChart();
         this.renderTaskTypeChart(dayPlans);
-        this.renderDailySummary(dateStr, dayPlans, completedPlans);
+        this.renderDailySummary(dateStr, dayPlans, completedPlans, rate);
         this.renderTaskDetailList(dayPlans, completedPlans);
     }
 
@@ -2721,22 +3602,70 @@ class SelfDisciplineApp {
         container.innerHTML = summary;
     }
 
+    renderWeeklyChart() {
+        const container = document.getElementById('weeklyChartContent');
+        const today = new Date();
+        const weekData = [];
+        
+        for (let i = 6; i >= 0; i--) {
+            const date = new Date(today);
+            date.setDate(date.getDate() - i);
+            const dateStr = this.formatDate(date);
+            const plans = this.getPlansForDate(dateStr);
+            const completed = this.getCompletedPlansForDate(dateStr);
+            const rate = plans.length > 0 ? Math.round((completed.length / plans.length) * 100) : 0;
+            
+            weekData.push({
+                day: ['日', '一', '二', '三', '四', '五', '六'][date.getDay()],
+                rate,
+                count: completed.length
+            });
+        }
+        
+        if (container) {
+            container.innerHTML = `
+                <div class="chart-container">
+                    <div class="chart-title">本周完成趋势</div>
+                    <div class="chart-bars">
+                        ${weekData.map(d => `
+                            <div class="chart-row">
+                                <div class="chart-day-label">周${d.day}</div>
+                                <div class="chart-bar-wrapper">
+                                    <div class="chart-bar" style="width: ${d.rate}%"></div>
+                                </div>
+                                <div class="chart-value">${d.count}项</div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+        }
+    }
+
     updateSuggestions() {
         const suggestions = this.generateSuggestions();
         const container = document.getElementById('suggestionsList');
         
+        if (!container) return;
+        
         if (suggestions.length === 0) {
-            container.innerHTML = '<div class="suggestion-placeholder"><p>开始记录您的计划后，系统将为您生成个性化建议</p></div>';
-        } else {
-            container.innerHTML = suggestions.map(s => `
-                <div class="suggestion-item">
-                    <div class="suggestion-icon">${s.icon}</div>
-                    <div class="suggestion-content">
-                        <div class="suggestion-title">${s.title}</div>
-                        <div class="suggestion-text">${s.text}</div>
-                    </div>
+            container.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon"></div>
+                    <p>开始记录您的计划后，系统将为您生成个性化建议</p>
                 </div>
-            `).join('');
+            `;
+        } else {
+            container.innerHTML = `
+                <div class="suggestions-list">
+                    ${suggestions.map(s => `
+                        <div class="suggestion-item">
+                            <div class="suggestion-title">${s.icon} ${s.title}</div>
+                            <div class="suggestion-desc">${s.text}</div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
         }
         
         this.updateDisciplineScore();
@@ -2858,6 +3787,114 @@ class SelfDisciplineApp {
     }
 }
 
+let app;
+
 document.addEventListener('DOMContentLoaded', () => {
-    new SelfDisciplineApp();
+    app = new SelfDisciplineApp();
+    window.app = app;
+    console.log('✅ 自律打卡系统初始化成功，app实例已暴露到全局');
 });
+
+let appInitialized = false;
+
+document.addEventListener('DOMContentLoaded', () => {
+    appInitialized = true;
+});
+
+document.addEventListener('click', (e) => {
+    if (!appInitialized) return;
+    
+    const btnComplete = e.target.closest('.btn-complete');
+    if (btnComplete) {
+        if (btnComplete.disabled) {
+            e.stopImmediatePropagation();
+            return;
+        }
+        
+        e.stopImmediatePropagation();
+        const planId = btnComplete.dataset.planId;
+        const date = btnComplete.dataset.date;
+        console.log('标记完成按钮点击:', planId, date);
+        
+        const currentApp = window.app || app;
+        if (currentApp) {
+            currentApp.confirmCompletePlan(planId, date);
+        } else {
+            console.error('app实例未初始化');
+        }
+        return;
+    }
+    
+    const target = e.target.closest('#confirmComplete, #cancelComplete');
+    if (!target) return;
+    
+    const modal = document.getElementById('confirmModal');
+    if (!modal || modal.style.display === 'none') return;
+    
+    e.stopImmediatePropagation();
+    
+    if (target.disabled) {
+        console.log('按钮还在冷却中');
+        return;
+    }
+    
+    if (target.id === 'confirmComplete') {
+        handleConfirmComplete();
+    } else if (target.id === 'cancelComplete') {
+        handleCancelComplete();
+    }
+}, true);
+
+function handleConfirmComplete() {
+    console.log('确认完成 - 状态检查');
+    
+    let finalPlan = window.__PENDING_PLAN || 
+                   (window.app && window.app.pendingCompletePlan) || 
+                   window.pendingCompletePlan;
+    
+    if (!finalPlan) {
+        console.error('找不到待完成的计划');
+        closeConfirmModal();
+        return;
+    }
+    
+    console.log('执行完成计划:', finalPlan);
+    
+    if (window.app) {
+        window.app.completePlan(finalPlan.planId, finalPlan.date);
+    }
+    
+    closeConfirmModal();
+    
+    window.__PENDING_PLAN = null;
+    window.pendingCompletePlan = null;
+    if (window.app) window.app.pendingCompletePlan = null;
+}
+
+function handleCancelComplete() {
+    console.log('取消完成');
+    closeConfirmModal();
+    
+    window.__PENDING_PLAN = null;
+    window.pendingCompletePlan = null;
+    if (window.app) window.app.pendingCompletePlan = null;
+}
+
+function closeConfirmModal() {
+    const modal = document.getElementById('confirmModal');
+    const overlay = document.getElementById('globalModalOverlay');
+    
+    if (modal) {
+        modal.style.display = 'none';
+        modal.style.opacity = '0';
+        modal.style.transform = 'scale(0.9)';
+        modal.classList.remove('active');
+    }
+    
+    if (overlay) {
+        overlay.classList.remove('active');
+        overlay.style.display = 'none';
+    }
+    
+    document.body.style.overflow = '';
+}
